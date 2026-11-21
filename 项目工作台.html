@@ -220,6 +220,8 @@ input:focus-visible,textarea:focus-visible,select:focus-visible{outline:none}
 .pref p{margin:6px 0 0 23px;font-size:12px;color:var(--ink-3);line-height:1.6}
 .pref-text{margin:8px 0 0 23px;width:calc(100% - 23px);max-width:260px;height:31px;border:1px solid var(--line);border-radius:0;background:#fff;font-size:12.5px;padding:0 8px;color:var(--ink)}
 .pref-text::placeholder{color:var(--ink-3)}
+.pref-acts{margin:8px 0 0 23px;display:flex;gap:8px;align-items:center}
+.pref .pref-err{margin:6px 0 0 23px;font-size:12px;color:#8a121c;line-height:1.6}
 .pref:last-child{border-bottom:1px solid var(--line);margin-bottom:6px}
 /* 设置里的接入步骤（可折叠） */
 .how{margin:9px 0 0 23px}
@@ -633,14 +635,43 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
    ================================================================== */
 var KEY = 'pw_v3';
 var VERSION = 3;
-var STAGES = ['立项', '设计', '开发', '测试', '上线', '复盘'];
+var STAGES = ['立项', '设计', '开发', '测试', '上线', '复盘'];   /* 默认阶段；用户可在设置里改 */
+var STAGE_MIN = 2;        // 自定义阶段的下限 / 上限，太少没意义，太多下拉长到没法看
+var STAGE_MAX = 10;
+var STAGE_LEN = 8;        // 单个阶段名最长几个字
 var IDEA_TAGS = ['待评估', '已采纳', '暂缓'];
 var IDLE_DAYS = 7;        // 进度停滞阈值（天）
 var SOON_DAYS = 3;        // 临近到期阈值（天）
 var LOW_PROGRESS = 80;    // 临近到期时视为「来不及」的进度线
 var EV_SHOW = 60;         // 抽屉里一次只铺最近这么多条流水，再早就去流水页看
 
-var state = { version: VERSION, projects: [], inbox: [] };
+var state = { version: VERSION, projects: [], inbox: [], meta: {} };
+
+/* 当前生效的阶段：存在数据里（跟着导出走），没设过就用默认那套 */
+function stages() {
+  var m = state.meta && state.meta.stages;
+  return (m && m.length) ? m : STAGES;
+}
+/* 下拉选项：项目当前的阶段如果已经被删掉了，也得留在列表里，不然一打开就被改成第一个 */
+function stageOptions(current) {
+  var list = stages().slice();
+  if (current && list.indexOf(current) < 0) list.push(current);
+  return list.map(function (s) {
+    return '<option' + (current === s ? ' selected' : '') + '>' + esc(s) + '</option>';
+  }).join('');
+}
+/* 把「A、B，C」这种文本收成干净的阶段数组；不合法返回 null，调用方自己提示 */
+function parseStages(text) {
+  var arr = String(text == null ? '' : text).split(/[，,、;；\s]+/);
+  var out = [];
+  arr.forEach(function (s) {
+    var v = String(s).replace(/[「」『』"']/g, '').trim().slice(0, STAGE_LEN);
+    if (v && out.indexOf(v) < 0) out.push(v);
+  });
+  if (out.length < STAGE_MIN) return { error: '至少要 ' + STAGE_MIN + ' 个阶段' };
+  if (out.length > STAGE_MAX) return { error: '最多 ' + STAGE_MAX + ' 个阶段' };
+  return { stages: out };
+}
 
 /* ---------- 基础工具 ---------- */
 function uid() { return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3); }
@@ -733,7 +764,12 @@ function normalizeProject(raw) {
   return {
     id: safeId(p.id),
     name: String(p.name || '未命名项目').slice(0, 60),
-    stage: STAGES.indexOf(p.stage) > -1 ? p.stage : '立项',
+    /* 阶段可以自定义，所以这里不比对固定列表，只要是个像样的短字符串就保留；
+       实在没有，就落到当前这套的第一个（自定义阶段里可能根本没有「立项」） */
+    stage: (function () {
+      var s = String(p.stage == null ? '' : p.stage).trim().slice(0, 12);
+      return s || (stages()[0] || '立项');
+    })(),
     progress: prog,
     due: isRealDate(p.due) ? p.due : '',
     next: String(p.next || '').slice(0, 120),
@@ -798,7 +834,7 @@ function healIds(st) {
   return st;
 }
 function loadState() {
-  var blank = { version: VERSION, projects: [], inbox: [] };
+  var blank = { version: VERSION, projects: [], inbox: [], meta: {} };
   var raw;
   try { raw = localStorage.getItem(KEY); } catch (e) { return blank; }
   if (!raw) return blank;
@@ -806,12 +842,23 @@ function loadState() {
     var o = JSON.parse(raw);
     var arr = Array.isArray(o) ? o : (isObj(o) && Array.isArray(o.projects) ? o.projects : null);
     if (!arr) return blank;
+    var meta = normalizeMeta(isObj(o) ? o.meta : null);
+    state.meta = meta;            /* 先落位，normalizeProject 才知道「第一段」叫什么 */
     return healIds({
       version: VERSION,
       projects: arr.filter(isObj).map(normalizeProject),
-      inbox: (isObj(o) && Array.isArray(o.inbox)) ? o.inbox.filter(isObj).map(normalizeInboxItem) : []
+      inbox: (isObj(o) && Array.isArray(o.inbox)) ? o.inbox.filter(isObj).map(normalizeInboxItem) : [],
+      meta: meta
     });
   } catch (e) { return blank; }
+}
+/* meta 只放「跟着数据走」的全局设定，目前就一套阶段 */
+function normalizeMeta(m) {
+  var out = {};
+  if (!isObj(m)) return out;
+  var r = parseStages(Array.isArray(m.stages) ? m.stages.join('、') : '');
+  if (r.stages) out.stages = r.stages;
+  return out;
 }
 function save() {
   if (externalPending) {
@@ -820,7 +867,7 @@ function save() {
     externalPending = false;
   }
   try {
-    var text = JSON.stringify({ version: VERSION, projects: state.projects, inbox: state.inbox || [] });
+    var text = JSON.stringify({ version: VERSION, projects: state.projects, inbox: state.inbox || [], meta: state.meta || {} });
     localStorage.setItem(KEY, text);
     lastSavedText = text;
   }
@@ -1135,7 +1182,7 @@ function viewOverview() {
         '<span class="count" id="filterCount">筛出 ' + list.length + ' / ' + state.projects.length + '</span>' +
       '</div>' +
       '<div class="frow"><span class="flab">阶段</span><div class="chips">' + chips('stage', 'all', '全部') +
-        STAGES.map(function (st) { return chips('stage', st, st); }).join('') + '</div></div>' +
+        stages().map(function (st) { return chips('stage', st, st); }).join('') + '</div></div>' +
       '<div class="frow"><span class="flab">健康度</span><div class="chips">' + chips('health', 'all', '全部') +
         chips('health', 'risk', '红 · 有阻塞', '#b0453b') +
         chips('health', 'watch', '黄 · 需关注', '#b8860b') +
@@ -1682,7 +1729,7 @@ function drawerInner(p) {
     '<div class="d-meta">' +
       '<span class="hchip" data-h="' + h.level + '" title="' + esc(h.reason) + '"><span class="dot"></span>' + h.label + ' · ' + esc(String(h.reason || '').split(/[，,]/)[0]) + '</span>' +
       '<select class="sel" data-act="set-stage" data-id="' + p.id + '">' +
-        STAGES.map(function (s) { return '<option' + (p.stage === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
+        stageOptions(p.stage) +
       '</select>' +
       '<span class="sep"></span>' +
       '<span class="due" data-state="' + due.state + '">' + (p.due ? md(p.due) + ' · ' : '') + due.label + '</span>' +
@@ -1812,6 +1859,8 @@ function currentPage() {
 }
 function render() {
   var y = window.scrollY;
+  /* 阶段是可改的，筛选项指向的那个阶段要是已经不存在了，悄悄退回「全部」 */
+  if (ui.stage !== 'all' && stages().indexOf(ui.stage) < 0) ui.stage = 'all';
   var page = currentPage();
   document.getElementById('app').innerHTML =
     page === 'report' ? viewReport() : page === 'stream' ? viewStream() : viewOverview();
@@ -1917,6 +1966,34 @@ function shelveForm(p, editing) {
 }
 
 
+/* 阶段输入不合法：在输入框下面挂一行红字，别关弹窗让用户重打 */
+function stageFormError(msg) {
+  var el = document.getElementById('stagesInput');
+  if (!el) { toast(msg); return; }
+  var wrap = el.parentNode;
+  var old = wrap.querySelector('.pref-err');
+  if (old) wrap.removeChild(old);
+  var p = document.createElement('p');
+  p.className = 'pref-err';
+  p.textContent = msg;
+  wrap.appendChild(p);
+  el.focus();
+  if (el.select) el.select();
+}
+function saveStagesFromInput() {
+  var el = document.getElementById('stagesInput');
+  if (!el) return;
+  var r = parseStages(el.value);
+  if (r.error) { stageFormError(r.error); return; }
+  if (state.meta && state.meta.stages && state.meta.stages.join('、') === r.stages.join('、')) {
+    toast('阶段没变'); return;
+  }
+  state.meta = state.meta || {};
+  state.meta.stages = r.stages;
+  save(); render(); openModal(settingsForm());
+  toast('阶段已改成 ' + r.stages.join('、') + '；老项目上的旧标签点进详情改一下就行');
+}
+
 function settingsForm() {
   function row(k, title, desc) {
     return '<div class="pref"><label><input type="checkbox" data-pref="' + k + '"' + (prefs[k] ? ' checked' : '') + '>' +
@@ -1924,7 +2001,16 @@ function settingsForm() {
   }
   return '<div class="modal-head"><h2>设置</h2>' +
     '<button type="button" class="btn btn-ghost btn-sm" data-act="mask-close">好了</button></div>' +
-    '<p class="sub">默认只留最常用的入口，需要时再打开；只影响显示，不动数据。</p>' +
+    '<p class="sub">「阶段」会写进数据（跟着导出和备份走）；下面几项只影响显示，不动数据。</p>' +
+    '<div class="pref"><label><b>阶段</b></label>' +
+      '<p>卡片上的阶段标签、新建项目时的下拉、筛选条，都按这一套来。用逗号或顿号分隔，' +
+      STAGE_MIN + '–' + STAGE_MAX + ' 个，每个不超过 ' + STAGE_LEN + ' 个字。' +
+      '改完之后，老项目上原来的阶段名不会被改写，点进详情在下拉里选一下新阶段就归位了。</p>' +
+      '<input class="pref-text" type="text" maxlength="160" id="stagesInput" data-stages-input' +
+        ' value="' + esc(stages().join('、')) + '" placeholder="例如：立项、设计、开发、测试、上线">' +
+      '<div class="pref-acts"><button type="button" class="btn btn-sm" data-act="save-stages">保存阶段</button>' +
+        ((state.meta && state.meta.stages) ? '<button type="button" class="btn btn-ghost btn-sm" data-act="reset-stages">恢复默认六步</button>' : '') +
+      '</div></div>' +
     row('showRegen', '周报页「重新生成」按钮', '周报每次都是按当前数据实时算的，重新生成只是重绘一遍。') +
     row('reportDownload', '周报页「下载 .md」按钮', '已有「存到文件夹」，写不进去时会自动降级下载。') +
     row('footExport', '页脚「导出下载」按钮', '有「保存到文件」和「自动备份文件夹」之后，它只用于应急导出一份。') +
@@ -1967,7 +2053,7 @@ function settingsForm() {
 
 function projectForm(p) {
   var isNew = !p;
-  p = p || { name: '', stage: '立项', progress: 0, due: '', next: '', link: '', desc: '' };
+  p = p || { name: '', stage: stages()[0], progress: 0, due: '', next: '', link: '', desc: '' };
   return '<h2>' + (isNew ? '新建项目' : '编辑项目') + '</h2>' +
     '<p class="sub">' + (isNew ? '建完可以在抽屉里加里程碑和阻塞项。' : '') + '</p>' +
     '<form id="pForm" data-id="' + (p.id || '') + '">' +
@@ -1983,7 +2069,7 @@ function projectForm(p) {
           '</select><p class="fhint">只复制里程碑清单（不带日期、不带流水），适合同类项目。</p></div>' : '') +
       '<div class="field-row">' +
         '<div class="field"><label>阶段</label><select name="stage">' +
-          STAGES.map(function (s) { return '<option' + (p.stage === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
+          stageOptions(p.stage) +
         '</select></div>' +
         '<div class="field"><label>进度 <i>0-100</i></label>' +
           '<input type="number" name="progress" min="0" max="100" step="1" value="' + (p.progress || 0) + '"></div>' +
@@ -2020,6 +2106,12 @@ document.addEventListener('click', function (e) {
     case 'new': openModal(projectForm(null)); return;
     case 'edit': if (p) openModal(projectForm(p)); return;
     case 'settings': openModal(settingsForm()); return;
+    case 'save-stages': saveStagesFromInput(); return;
+    case 'reset-stages':
+      if (state.meta) delete state.meta.stages;
+      save(); render(); openModal(settingsForm());
+      toast('阶段恢复成默认六步');
+      return;
     case 'toggle-delivered':
       ui.showDelivered = !ui.showDelivered; renderListOnly();
       var abtn = document.querySelector('.archbtn'); if (abtn) { try { abtn.focus({ preventScroll: true }); } catch (e2) {} }
@@ -2362,7 +2454,7 @@ document.addEventListener('submit', function (e) {
   if (linkRaw && !linkClean) toast('外链只认 http(s) / mailto，这条已清空');
   var data = {
     name: String(fd.get('name') || '').trim().slice(0, 60),
-    stage: STAGES.indexOf(fd.get('stage')) > -1 ? fd.get('stage') : '立项',
+    stage: (String(fd.get('stage') || '').trim().slice(0, 12) || '立项'),
     progress: isFinite(progRaw) ? Math.max(0, Math.min(100, progRaw)) : 0,
     due: isRealDate(String(fd.get('due') || '')) ? String(fd.get('due')) : '',
     next: String(fd.get('next') || '').trim().slice(0, 120),
@@ -2596,6 +2688,7 @@ function fsOpenSupported() { return typeof window.showOpenFilePicker === 'functi
 
 function payloadObject() {
   var o = { version: VERSION, exportedAt: new Date().toISOString(), projects: state.projects, inbox: state.inbox || [] };
+  if (state.meta && state.meta.stages && state.meta.stages.length) o.meta = { stages: state.meta.stages.slice() };
   if (authorName()) o.by = authorName();
   return o;
 }
@@ -2612,15 +2705,16 @@ function parsePayload(text) {
   /* 空库备份也要能还原：带 version / exportedAt 标记的才认 */
   if (!objs.length) {
     if (!inbox.length && !(isObj(o) && (o.version != null || o.exportedAt != null))) return null;
-    return { projects: [], inbox: inbox };
+    return { projects: [], inbox: inbox, meta: normalizeMeta(isObj(o) ? o.meta : null) };
   }
   var looksLikeProjects = objs.some(function (x) {
     return x.name != null || x.progress != null || x.milestones != null || x.blockers != null;
   });
   if (!looksLikeProjects) return null;
-  return { projects: objs, inbox: inbox };
+  return { projects: objs, inbox: inbox, meta: normalizeMeta(isObj(o) ? o.meta : null) };
 }
 function applyPayload(data) {
+  state.meta = normalizeMeta(data.meta);      /* 先定阶段，再整理项目 */
   state.projects = (data.projects || []).map(normalizeProject);
   state.inbox = (data.inbox || []).map(normalizeInboxItem);
   healIds(state);
